@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xg-vision"
+version = "0.1.0"
+description = "Vision-based Expected Goals models from SoccerNet shot frames."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "PyYAML>=6.0",
+    "tqdm>=4.66",
+    "Pillow>=10.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+homography = [
+    "opencv-python>=4.8",
+    "xgboost>=2.0",
+    "ultralytics>=8.0",
+    "joblib>=1.3",
+]
+
+[project.scripts]
+xg-inspect = "xg_vision.inspect_dataset:main"
+xg-train = "xg_vision.train:main"
+xg-evaluate = "xg_vision.evaluate:main"
+xg-predict = "xg_vision.predict:main"
+xg-visualize = "xg_vision.visualize:main"
+xg-train-tabular = "xg_vision.train_tabular:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
