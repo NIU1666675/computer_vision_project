@@ -15,14 +15,21 @@ training:
   learning_rate: 0.0003
   weight_decay: 0.0001
   dropout: 0.25
-  early_stopping_patience: 8
+  early_stopping_patience: 10
   max_grad_norm: 1.0
   use_amp: true
-  threshold: 0.5
+  threshold: auto
+  threshold_metric: f1
+  selection_metric: average_precision
+  pos_weight_strategy: sqrt
+  pos_weight_scale: 1.0
   augment: true
 
 model:
   name: cnn
+  backbone: auto
+  pretrained: true
+  freeze_backbone: true
   feature_dim: 256
   cnn_channels: [32, 64, 128, 256]
   classifier_hidden_dim: 128

@@ -60,7 +60,7 @@ def main() -> None:
         loader,
         device,
         criterion=None,
-        threshold=float(config["training"].get("threshold", 0.5)),
+        threshold=float(checkpoint.get("threshold", 0.5)),
     )
 
     out_dir = Path(args.output_dir) if args.output_dir else Path(args.checkpoint).resolve().parent

@@ -26,6 +26,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    config["model"]["backbone"] = "custom"
+    config["model"]["pretrained"] = False
     frames_root = find_frames_root(args.dataset_root)
     config["data"]["dataset_root"] = str(frames_root)
     print(f"frames_root={frames_root}")

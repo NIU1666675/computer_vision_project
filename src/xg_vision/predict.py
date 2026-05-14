@@ -44,6 +44,7 @@ def predict_shot_dirs(
 ) -> pd.DataFrame:
     device = resolve_device(device_arg)
     model, checkpoint = load_model(checkpoint_path, device)
+    threshold = float(checkpoint.get("threshold", 0.5))
     rows = []
     for shot_dir in shot_dirs:
         x = tensor_from_shot_dir(shot_dir, checkpoint).unsqueeze(0).to(device)
@@ -56,7 +57,7 @@ def predict_shot_dirs(
                 "shot_dir": str(Path(shot_dir).resolve()),
                 "label": label,
                 "xg": prob,
-                "prediction": int(prob >= float(checkpoint["config"]["training"].get("threshold", 0.5))),
+                "prediction": int(prob >= threshold),
             }
         )
     return pd.DataFrame(rows)

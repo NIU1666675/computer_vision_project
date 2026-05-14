@@ -8,6 +8,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
 from .engine import save_json
@@ -44,9 +45,16 @@ def split_frame(df: pd.DataFrame, seed: int):
     return train.copy(), test.copy()
 
 
+def clean_features(frame: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    frame = frame.copy()
+    frame[features] = frame[features].replace([np.inf, -np.inf], np.nan)
+    return frame
+
+
 def fit_logistic(train: pd.DataFrame, features: list[str]):
     model = Pipeline(
         steps=[
+            ("impute", SimpleImputer(strategy="median")),
             ("scale", StandardScaler()),
             (
                 "clf",
@@ -121,6 +129,7 @@ def main() -> None:
     if not features:
         raise SystemExit("No numeric feature columns found")
 
+    df = clean_features(df, features)
     train, test = split_frame(df, args.seed)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

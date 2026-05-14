@@ -9,7 +9,7 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 from torch.utils.data import Dataset
 
 
@@ -325,6 +325,8 @@ class FrameTransform:
         return (tensor - self.mean) / self.std
 
     def _augment(self, image: Image.Image) -> Image.Image:
+        if random.random() < 0.45:
+            image = self._random_resized_crop(image)
         if random.random() < 0.5:
             image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         if random.random() < 0.35:
@@ -333,7 +335,20 @@ class FrameTransform:
             image = ImageEnhance.Contrast(image).enhance(random.uniform(0.85, 1.15))
         if random.random() < 0.25:
             image = ImageEnhance.Color(image).enhance(random.uniform(0.90, 1.10))
+        if random.random() < 0.12:
+            image = image.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.2, 0.8)))
         return image
+
+    def _random_resized_crop(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        scale = random.uniform(0.90, 1.0)
+        crop_w = max(int(width * scale), 1)
+        crop_h = max(int(height * scale), 1)
+        left = random.randint(0, max(width - crop_w, 0))
+        top = random.randint(0, max(height - crop_h, 0))
+        cropped = image.crop((left, top, left + crop_w, top + crop_h))
+        out_h, out_w = self.image_size
+        return cropped.resize((out_w, out_h), Image.Resampling.BILINEAR)
 
 
 def load_rgb(path: Path) -> Image.Image:

@@ -25,14 +25,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "learning_rate": 3e-4,
         "weight_decay": 1e-4,
         "dropout": 0.25,
-        "early_stopping_patience": 8,
+        "early_stopping_patience": 10,
         "max_grad_norm": 1.0,
         "use_amp": True,
-        "threshold": 0.5,
+        "threshold": "auto",
+        "threshold_metric": "f1",
+        "selection_metric": "average_precision",
+        "pos_weight_strategy": "sqrt",
+        "pos_weight_scale": 1.0,
         "augment": True,
     },
     "model": {
         "name": "cnn",
+        "backbone": "auto",
+        "pretrained": True,
+        "freeze_backbone": True,
         "feature_dim": 256,
         "cnn_channels": [32, 64, 128, 256],
         "classifier_hidden_dim": 128,
@@ -74,11 +81,3 @@ def save_config(config: Mapping[str, Any], path: str | Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(dict(config), handle, sort_keys=False)
-
-
-def set_by_dotted_key(config: dict[str, Any], dotted_key: str, value: Any) -> None:
-    parts = dotted_key.split(".")
-    cursor = config
-    for part in parts[:-1]:
-        cursor = cursor.setdefault(part, {})
-    cursor[parts[-1]] = value

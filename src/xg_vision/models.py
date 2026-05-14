@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Sequence
 
 import torch
@@ -49,6 +50,75 @@ class ConvBackbone(nn.Module):
         return self.projection(x)
 
 
+class TorchVisionBackbone(nn.Module):
+    """ImageNet backbone used when torchvision is available."""
+
+    def __init__(self, name: str = "resnet18", feature_dim: int = 256, pretrained: bool = True, freeze: bool = True) -> None:
+        super().__init__()
+        try:
+            import torchvision.models as tv_models
+        except ImportError as exc:
+            raise ImportError("Install torchvision to use pretrained backbones.") from exc
+
+        name = name.lower()
+        if name != "resnet18":
+            raise ValueError("Only resnet18 is currently supported as pretrained backbone")
+
+        weights = tv_models.ResNet18_Weights.DEFAULT if pretrained else None
+        model = tv_models.resnet18(weights=weights)
+        in_dim = int(model.fc.in_features)
+        model.fc = nn.Identity()
+        self.encoder = model
+        self.projection = nn.Sequential(
+            nn.Linear(in_dim, feature_dim),
+            nn.LayerNorm(feature_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.feature_dim = feature_dim
+        self.frozen = freeze
+        if freeze:
+            for parameter in self.encoder.parameters():
+                parameter.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.frozen:
+            self.encoder.eval()
+            with torch.no_grad():
+                x = self.encoder(x)
+        else:
+            x = self.encoder(x)
+        return self.projection(x)
+
+
+def make_backbone(
+    backbone: str = "custom",
+    cnn_channels: Sequence[int] = (32, 64, 128, 256),
+    feature_dim: int = 256,
+    pretrained: bool = True,
+    freeze_backbone: bool = True,
+) -> nn.Module:
+    name = backbone.lower()
+    if name == "auto":
+        try:
+            module = TorchVisionBackbone("resnet18", feature_dim, pretrained, freeze_backbone)
+            module.resolved_backbone = "resnet18"  # type: ignore[attr-defined]
+            return module
+        except Exception as exc:
+            warnings.warn(f"Falling back to custom CNN backbone because resnet18 could not be loaded: {exc}")
+            module = ConvBackbone(cnn_channels, feature_dim)
+            module.resolved_backbone = "custom"  # type: ignore[attr-defined]
+            return module
+    if name in {"custom", "small_cnn", "cnn"}:
+        module = ConvBackbone(cnn_channels, feature_dim)
+        module.resolved_backbone = "custom"  # type: ignore[attr-defined]
+        return module
+    if name == "resnet18":
+        module = TorchVisionBackbone(name, feature_dim, pretrained, freeze_backbone)
+        module.resolved_backbone = "resnet18"  # type: ignore[attr-defined]
+        return module
+    raise ValueError("backbone must be one of: auto, custom, resnet18")
+
+
 class BinaryHead(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int = 128, dropout: float = 0.25) -> None:
         super().__init__()
@@ -71,9 +141,13 @@ class CNNClassifier(nn.Module):
         feature_dim: int = 256,
         classifier_hidden_dim: int = 128,
         dropout: float = 0.25,
+        backbone: str = "custom",
+        pretrained: bool = True,
+        freeze_backbone: bool = True,
     ) -> None:
         super().__init__()
-        self.backbone = ConvBackbone(cnn_channels, feature_dim)
+        self.backbone = make_backbone(backbone, cnn_channels, feature_dim, pretrained, freeze_backbone)
+        self.resolved_backbone = getattr(self.backbone, "resolved_backbone", backbone)
         self.classifier = BinaryHead(feature_dim, classifier_hidden_dim, dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -89,9 +163,13 @@ class CNNLSTMClassifier(nn.Module):
         lstm_hidden_dim: int = 256,
         lstm_layers: int = 1,
         dropout: float = 0.25,
+        backbone: str = "custom",
+        pretrained: bool = True,
+        freeze_backbone: bool = True,
     ) -> None:
         super().__init__()
-        self.backbone = ConvBackbone(cnn_channels, feature_dim)
+        self.backbone = make_backbone(backbone, cnn_channels, feature_dim, pretrained, freeze_backbone)
+        self.resolved_backbone = getattr(self.backbone, "resolved_backbone", backbone)
         lstm_dropout = dropout if lstm_layers > 1 else 0.0
         self.lstm = nn.LSTM(
             input_size=feature_dim,
@@ -122,9 +200,13 @@ class CNNAttentionClassifier(nn.Module):
         attention_layers: int = 2,
         attention_ff_dim: int = 512,
         dropout: float = 0.25,
+        backbone: str = "custom",
+        pretrained: bool = True,
+        freeze_backbone: bool = True,
     ) -> None:
         super().__init__()
-        self.backbone = ConvBackbone(cnn_channels, feature_dim)
+        self.backbone = make_backbone(backbone, cnn_channels, feature_dim, pretrained, freeze_backbone)
+        self.resolved_backbone = getattr(self.backbone, "resolved_backbone", backbone)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, feature_dim))
         self.positional_embedding = nn.Parameter(torch.zeros(1, sequence_length + 1, feature_dim))
         encoder_layer = nn.TransformerEncoderLayer(
@@ -134,7 +216,6 @@ class CNNAttentionClassifier(nn.Module):
             dropout=dropout,
             activation="gelu",
             batch_first=True,
-            norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=attention_layers)
         self.norm = nn.LayerNorm(feature_dim)
@@ -185,6 +266,9 @@ def model_kwargs_from_config(config: dict, model_name: str) -> dict:
         "feature_dim": int(model_cfg.get("feature_dim", 256)),
         "classifier_hidden_dim": int(model_cfg.get("classifier_hidden_dim", 128)),
         "dropout": float(train_cfg.get("dropout", 0.25)),
+        "backbone": str(model_cfg.get("backbone", "custom")),
+        "pretrained": bool(model_cfg.get("pretrained", True)),
+        "freeze_backbone": bool(model_cfg.get("freeze_backbone", True)),
     }
     name = canonical_model_name(model_name)
     if name == "cnn":

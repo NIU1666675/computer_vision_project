@@ -19,7 +19,7 @@ from .data import (
     summarize_manifest,
 )
 from .engine import load_checkpoint, predict_batches, resolve_device, save_json, seed_everything, train_one_epoch
-from .metrics import metric_for_selection
+from .metrics import best_threshold, binary_metrics, metric_for_selection
 from .models import build_model, canonical_model_name, model_input_type, model_kwargs_from_config
 
 
@@ -36,6 +36,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", default=None, help="Example: cuda, cuda:0, cpu.")
+    parser.add_argument("--backbone", choices=["auto", "custom", "resnet18"], default=None)
+    parser.add_argument("--no-pretrained", action="store_true", help="Disable ImageNet weights for torchvision backbones.")
+    parser.add_argument("--fine-tune-backbone", action="store_true", help="Train the full pretrained backbone.")
+    parser.add_argument("--threshold", default=None, help="Classification threshold or 'auto'.")
+    parser.add_argument("--selection-metric", default=None, help="Metric for best checkpoint: average_precision, auc_roc, f1.")
     parser.add_argument("--no-augment", action="store_true", help="Disable train augmentations.")
     parser.add_argument("--no-amp", action="store_true", help="Disable mixed precision.")
     parser.add_argument("--limit-samples", type=int, default=None, help="Small debug limit per split.")
@@ -59,6 +64,16 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
         config["training"]["num_workers"] = args.num_workers
     if args.seed is not None:
         config["data"]["seed"] = args.seed
+    if args.backbone is not None:
+        config["model"]["backbone"] = args.backbone
+    if args.no_pretrained:
+        config["model"]["pretrained"] = False
+    if args.fine_tune_backbone:
+        config["model"]["freeze_backbone"] = False
+    if args.threshold is not None:
+        config["training"]["threshold"] = args.threshold
+    if args.selection_metric is not None:
+        config["training"]["selection_metric"] = args.selection_metric
     if args.no_augment:
         config["training"]["augment"] = False
     if args.no_amp:
@@ -83,12 +98,21 @@ def make_loader(
     )
 
 
-def positive_weight(labels: list[int]) -> float:
+def positive_weight(labels: list[int], strategy: str = "sqrt", scale: float = 1.0) -> float:
     positives = sum(labels)
     negatives = len(labels) - positives
     if positives == 0:
         return 1.0
-    return float(negatives / positives)
+    ratio = negatives / positives
+    if strategy == "none":
+        weight = 1.0
+    elif strategy == "linear":
+        weight = ratio
+    elif strategy == "sqrt":
+        weight = ratio**0.5
+    else:
+        raise ValueError("pos_weight_strategy must be one of: none, sqrt, linear")
+    return float(weight * scale)
 
 
 def make_scaler(device: torch.device, enabled: bool):
@@ -98,6 +122,26 @@ def make_scaler(device: torch.device, enabled: bool):
         return torch.amp.GradScaler("cuda", enabled=True)
     except TypeError:
         return torch.cuda.amp.GradScaler(enabled=True)
+
+
+def evaluate_with_threshold(
+    model,
+    loader,
+    device: torch.device,
+    criterion,
+    threshold_config: str | float,
+    threshold_metric: str,
+) -> tuple[dict[str, Any], pd.DataFrame, float]:
+    base_metrics, predictions = predict_batches(model, loader, device, criterion, threshold=0.5)
+    if str(threshold_config).lower() == "auto":
+        threshold, metrics = best_threshold(predictions["label"], predictions["xg"], metric=threshold_metric)
+    else:
+        threshold = float(threshold_config)
+        metrics = binary_metrics(predictions["label"], predictions["xg"], threshold=threshold)
+    if "loss" in base_metrics:
+        metrics["loss"] = base_metrics["loss"]
+    predictions["prediction"] = (predictions["xg"] >= threshold).astype(int)
+    return metrics, predictions, threshold
 
 
 def main() -> None:
@@ -161,10 +205,15 @@ def main() -> None:
 
     model_kwargs = model_kwargs_from_config(config, model_name)
     model = build_model(model_name, **model_kwargs).to(device)
-    pos_weight = positive_weight(train_ds.labels)
+    model_kwargs["backbone"] = getattr(model, "resolved_backbone", model_kwargs.get("backbone", "custom"))
+    pos_weight = positive_weight(
+        train_ds.labels,
+        strategy=str(config["training"].get("pos_weight_strategy", "sqrt")),
+        scale=float(config["training"].get("pos_weight_scale", 1.0)),
+    )
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight, device=device))
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr=float(config["training"].get("learning_rate", 3e-4)),
         weight_decay=float(config["training"].get("weight_decay", 1e-4)),
     )
@@ -173,13 +222,16 @@ def main() -> None:
 
     print(summary.to_string(index=False))
     print(f"Training {model_name} on {device} -> {run_dir}")
+    print(f"Backbone: {model_kwargs.get('backbone', 'custom')}")
     print(f"Train positive weight: {pos_weight:.3f}")
 
     best_score = float("-inf")
     best_epoch = 0
     stale_epochs = 0
     history: list[dict[str, Any]] = []
-    threshold = float(config["training"].get("threshold", 0.5))
+    threshold_config = config["training"].get("threshold", "auto")
+    threshold_metric = str(config["training"].get("threshold_metric", "f1"))
+    selection_metric = str(config["training"].get("selection_metric", "average_precision"))
     patience = int(config["training"].get("early_stopping_patience", 8))
     epochs = int(config["training"].get("epochs", 40))
     max_grad_norm = config["training"].get("max_grad_norm", 1.0)
@@ -195,8 +247,15 @@ def main() -> None:
             scaler=scaler,
             max_grad_norm=max_grad_norm,
         )
-        val_metrics, val_predictions = predict_batches(model, val_loader, device, criterion, threshold)
-        score = metric_for_selection(val_metrics)
+        val_metrics, val_predictions, selected_threshold = evaluate_with_threshold(
+            model,
+            val_loader,
+            device,
+            criterion,
+            threshold_config,
+            threshold_metric,
+        )
+        score = metric_for_selection(val_metrics, selection_metric)
         scheduler.step(score)
 
         row = {"epoch": epoch, "train_loss": train_loss, **{f"val_{k}": v for k, v in val_metrics.items()}}
@@ -205,7 +264,9 @@ def main() -> None:
 
         print(
             f"epoch {epoch:03d} | loss {train_loss:.4f} | "
-            f"val_auc {val_metrics['auc_roc']:.4f} | val_f1 {val_metrics['f1']:.4f}"
+            f"val_ap {val_metrics['average_precision']:.4f} | "
+            f"val_auc {val_metrics['auc_roc']:.4f} | val_f1 {val_metrics['f1']:.4f} | "
+            f"thr {selected_threshold:.3f}"
         )
 
         checkpoint = {
@@ -214,6 +275,7 @@ def main() -> None:
             "state_dict": model.state_dict(),
             "config": config,
             "epoch": epoch,
+            "threshold": selected_threshold,
             "val_metrics": val_metrics,
             "split_summary": summary.to_dict("records"),
         }
@@ -233,12 +295,15 @@ def main() -> None:
 
     best_checkpoint = load_checkpoint(run_dir / "best.pt", map_location=device)
     model.load_state_dict(best_checkpoint["state_dict"])
-    test_metrics, test_predictions = predict_batches(model, test_loader, device, criterion, threshold)
+    test_threshold = float(best_checkpoint.get("threshold", 0.5))
+    test_metrics, test_predictions = predict_batches(model, test_loader, device, criterion, test_threshold)
     test_predictions.to_csv(run_dir / "test_predictions.csv", index=False)
 
     result = {
         "best_epoch": int(best_epoch),
         "best_validation_score": float(best_score),
+        "selection_metric": selection_metric,
+        "threshold": test_threshold,
         "best_val_metrics": best_checkpoint.get("val_metrics", {}),
         "test_metrics": test_metrics,
     }

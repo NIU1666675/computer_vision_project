@@ -15,6 +15,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--backbone", choices=["auto", "custom", "resnet18"], default=None)
+    parser.add_argument("--no-pretrained", action="store_true")
+    parser.add_argument("--fine-tune-backbone", action="store_true")
+    parser.add_argument("--threshold", default=None)
+    parser.add_argument("--selection-metric", default=None)
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     return parser.parse_args()
@@ -42,6 +47,16 @@ def main() -> None:
         shared += ["--num-workers", str(args.num_workers)]
     if args.device is not None:
         shared += ["--device", args.device]
+    if args.backbone is not None:
+        shared += ["--backbone", args.backbone]
+    if args.no_pretrained:
+        shared += ["--no-pretrained"]
+    if args.fine_tune_backbone:
+        shared += ["--fine-tune-backbone"]
+    if args.threshold is not None:
+        shared += ["--threshold", args.threshold]
+    if args.selection_metric is not None:
+        shared += ["--selection-metric", args.selection_metric]
     if args.no_augment:
         shared += ["--no-augment"]
     if args.no_amp:
